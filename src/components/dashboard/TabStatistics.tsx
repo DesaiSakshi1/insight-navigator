@@ -1,11 +1,11 @@
-import { useMemo, useState } from 'react';
-import { DataRow, getNumericStats } from '@/lib/generateData';
+import { useState } from 'react';
+import { AnalysisResult } from '@/lib/analyzeData';
 import { Search } from 'lucide-react';
 
-interface Props { data: DataRow[] }
+interface Props { result: AnalysisResult }
 
-export default function TabStatistics({ data }: Props) {
-  const stats = useMemo(() => getNumericStats(data), [data]);
+export default function TabStatistics({ result }: Props) {
+  const stats = result.stats;
   const [filter, setFilter] = useState('');
   const [sortCol, setSortCol] = useState<string | null>(null);
   const [sortAsc, setSortAsc] = useState(true);
@@ -41,31 +41,35 @@ export default function TabStatistics({ data }: Props) {
           <input className="bg-secondary/50 border border-border rounded-lg pl-9 pr-4 py-2 text-sm text-foreground outline-none focus:border-primary/50" placeholder="Filter columns..." value={filter} onChange={e => setFilter(e.target.value)} />
         </div>
       </div>
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-border text-muted-foreground">
-            {cols.map(c => (
-              <th key={c} className="text-left py-2 px-3 cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => c !== 'feature' && handleSort(c)}>
-                {c.charAt(0).toUpperCase() + c.slice(1)} {sortCol === c ? (sortAsc ? '↑' : '↓') : ''}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((s, i) => (
-            <tr key={s.feature} className={`border-b border-border/30 ${i % 2 === 0 ? 'bg-secondary/20' : ''}`}>
-              <td className="py-2 px-3 font-medium text-foreground">{s.feature}</td>
-              <td className="py-2 px-3 text-muted-foreground">{s.count}</td>
-              <td className="py-2 px-3 text-muted-foreground">{s.mean}</td>
-              <td className="py-2 px-3 text-muted-foreground">{s.median}</td>
-              <td className="py-2 px-3 text-muted-foreground">{s.std}</td>
-              <td className="py-2 px-3 text-primary">{s.min}</td>
-              <td className="py-2 px-3 text-accent">{s.max}</td>
-              <td className={`py-2 px-3 font-semibold ${skewnessColor(s.skewness)}`}>{s.skewness}</td>
+      {sorted.length === 0 ? (
+        <p className="text-muted-foreground text-sm">No numeric columns found in this dataset.</p>
+      ) : (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border text-muted-foreground">
+              {cols.map(c => (
+                <th key={c} className="text-left py-2 px-3 cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => c !== 'feature' && handleSort(c)}>
+                  {c.charAt(0).toUpperCase() + c.slice(1)} {sortCol === c ? (sortAsc ? '↑' : '↓') : ''}
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {sorted.map((s, i) => (
+              <tr key={s.feature} className={`border-b border-border/30 ${i % 2 === 0 ? 'bg-secondary/20' : ''}`}>
+                <td className="py-2 px-3 font-medium text-foreground">{s.feature}</td>
+                <td className="py-2 px-3 text-muted-foreground">{s.count}</td>
+                <td className="py-2 px-3 text-muted-foreground">{s.mean}</td>
+                <td className="py-2 px-3 text-muted-foreground">{s.median}</td>
+                <td className="py-2 px-3 text-muted-foreground">{s.std}</td>
+                <td className="py-2 px-3 text-primary">{s.min}</td>
+                <td className="py-2 px-3 text-accent">{s.max}</td>
+                <td className={`py-2 px-3 font-semibold ${skewnessColor(s.skewness)}`}>{s.skewness}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

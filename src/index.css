@@ -118,6 +118,22 @@
   animation: pulse-glow 2s ease-in-out infinite;
 }
 
+@keyframes insight-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ai-insight-row {
+  opacity: 0;
+  animation: insight-fade-in 0.4s ease-out forwards;
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

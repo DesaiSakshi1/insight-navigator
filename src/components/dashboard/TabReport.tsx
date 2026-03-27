@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { DataRow, getNumericStats, getMissingValues, getCorrelationMatrix, getColumnInfo, getCategoricalCounts } from '@/lib/generateData';
+import { AnalysisResult } from '@/lib/analyzeData';
 import { BarChart3, Download, Share2, FileText, Database, AlertTriangle, TrendingUp, Copy, Check, Mail, MessageCircle, Link, Loader2 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -7,20 +7,21 @@ import { toast } from '@/hooks/use-toast';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import {
   renderDonutChart, renderMeanBarChart, renderHistogram,
-  renderCategoryBar, renderPieChart, renderMissingBar,
-  renderCorrelationHeatmap, renderBoxPlots,
+  renderCategoryBar, renderMissingBar,
+  renderCorrelationHeatmap,
 } from '@/lib/pdfCharts';
 
-interface Props { data: DataRow[] }
+interface FileInfo { name: string; size: string; rows: number; duration: string }
+interface Props { result: AnalysisResult; fileInfo: FileInfo | null }
 
-export default function TabReport({ data }: Props) {
-  const stats = useMemo(() => getNumericStats(data), [data]);
-  const missing = useMemo(() => getMissingValues(data), [data]);
-  const colInfo = useMemo(() => getColumnInfo(data), [data]);
-  const catCounts = useMemo(() => getCategoricalCounts(data), [data]);
-  const { columns, matrix } = useMemo(() => getCorrelationMatrix(data), [data]);
+export default function TabReport({ result, fileInfo }: Props) {
+  const { data, colInfo, stats, missing, correlation, categorical } = result;
+  const { columns: corrCols, matrix } = correlation;
   const withMissing = missing.filter(m => m.missing > 0);
   const date = new Date().toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' });
+  const numericCount = colInfo.filter(c => c.type === 'numeric').length;
+  const categoricalCount = colInfo.filter(c => c.type === 'categorical' || c.type === 'date').length;
+  const totalOutliers = result.outliers.reduce((s, o) => s + o.count, 0);
 
   const [shareOpen, setShareOpen] = useState(false);
   const [shareLink, setShareLink] = useState('');
@@ -29,19 +30,24 @@ export default function TabReport({ data }: Props) {
 
   const topCorr = useMemo(() => {
     const pairs: { a: string; b: string; r: number }[] = [];
-    for (let i = 0; i < columns.length; i++) {
-      for (let j = i + 1; j < columns.length; j++) {
-        const r = matrix.find(m => m.x === columns[i] && m.y === columns[j])?.value ?? 0;
-        if (Math.abs(r) > 0.5) pairs.push({ a: columns[i], b: columns[j], r });
+    for (let i = 0; i < corrCols.length; i++) {
+      for (let j = i + 1; j < corrCols.length; j++) {
+        const r = matrix.find(m => m.x === corrCols[i] && m.y === corrCols[j])?.value ?? 0;
+        if (Math.abs(r) > 0.5) pairs.push({ a: corrCols[i], b: corrCols[j], r });
       }
     }
     return pairs.sort((a, b) => Math.abs(b.r) - Math.abs(a.r)).slice(0, 5);
-  }, [columns, matrix]);
+  }, [corrCols, matrix]);
 
-  const numericCols = colInfo.filter(c => c.type === 'numeric').length;
-  const categoricalCols = colInfo.filter(c => c.type === 'object').length;
+  const strengthLabel = (r: number) => {
+    const abs = Math.abs(r);
+    if (abs > 0.9) return 'Very Strong';
+    if (abs > 0.7) return 'Strong';
+    if (abs > 0.5) return 'Moderate';
+    return 'Weak';
+  };
 
-  // ── PDF Generation ──
+  // ── PDF Generation ─────────────────────────────────────────────────────────
   const handleDownloadPDF = async () => {
     setGenerating(true);
     try {
@@ -61,305 +67,184 @@ export default function TabReport({ data }: Props) {
     let pageNum = 1;
     const now = new Date().toLocaleString();
     let figNum = 0;
-
     const BLUE = [21, 101, 192] as const;
     const NAVY = [11, 22, 40] as const;
     const WHITE_ALT = [239, 246, 255] as const;
     const LIGHT = [248, 250, 252] as const;
 
     const footer = () => {
-      pdf.setFontSize(9);
-      pdf.setTextColor(150);
-      pdf.text('AutoEDA | NexGen Analytix | Confidential', M, H - 8);
+      pdf.setFontSize(9); pdf.setTextColor(150);
+      pdf.text('AutoEDA | Automated EDA Report | Confidential', M, H - 8);
       pdf.text(`Page ${pageNum}`, W - M, H - 8, { align: 'right' });
       pageNum++;
     };
-
     const sectionHead = (text: string, y: number) => {
       pdf.setFillColor(...BLUE);
       pdf.rect(M, y, CW, 9, 'F');
-      pdf.setTextColor(255, 255, 255);
-      pdf.setFontSize(12);
-      pdf.setFont('helvetica', 'bold');
+      pdf.setTextColor(255, 255, 255); pdf.setFontSize(12); pdf.setFont('helvetica', 'bold');
       pdf.text(text, M + 3, y + 6.5);
       return y + 13;
     };
-
-    /** Add chart image with grey box, title above, caption below */
-    const addChartImage = (
-      imgData: string, x: number, y: number, w: number, h: number, title: string
-    ): number => {
+    const addChartImage = (imgData: string, x: number, y: number, w: number, h: number, title: string): number => {
       figNum++;
-      // Title
-      pdf.setFont('helvetica', 'bold');
-      pdf.setFontSize(10);
-      pdf.setTextColor(30, 41, 59); // #1E293B
-      pdf.text(title, x + w / 2, y, { align: 'center' });
-      y += 4;
-      // Grey box
-      pdf.setFillColor(248, 250, 252);
-      pdf.setDrawColor(203, 213, 225);
-      pdf.setLineWidth(0.3);
+      pdf.setFont('helvetica', 'bold'); pdf.setFontSize(10); pdf.setTextColor(30, 41, 59);
+      pdf.text(title, x + w / 2, y, { align: 'center' }); y += 4;
+      pdf.setFillColor(248, 250, 252); pdf.setDrawColor(203, 213, 225); pdf.setLineWidth(0.3);
       pdf.rect(x, y, w, h, 'FD');
-      // Image
-      pdf.addImage(imgData, 'PNG', x + 2, y + 2, w - 4, h - 4);
-      y += h + 2;
-      // Caption
-      pdf.setFont('helvetica', 'italic');
-      pdf.setFontSize(8);
-      pdf.setTextColor(148, 163, 184);
+      pdf.addImage(imgData, 'PNG', x + 2, y + 2, w - 4, h - 4); y += h + 2;
+      pdf.setFont('helvetica', 'italic'); pdf.setFontSize(8); pdf.setTextColor(148, 163, 184);
       pdf.text(`Figure ${figNum}: ${title}`, x + w / 2, y + 3, { align: 'center' });
       return y + 7;
     };
 
-    const getRecommendation = (col: string, pct: number) => {
-      if (pct === 0) return 'No action needed';
-      if (col === 'Rating') return 'Fill with Median';
-      if (col === 'Discount') return 'Fill with Mode';
-      return 'Investigate';
-    };
+    // Pre-render charts
+    const donutImg = await renderDonutChart(numericCount, categoricalCount);
+    const meanImg = await renderMeanBarChart(stats.map(s => s.feature), stats.map(s => s.mean));
 
-    const strengthLabel = (r: number) => {
-      const abs = Math.abs(r);
-      if (abs > 0.9) return 'Very Strong';
-      if (abs > 0.7) return 'Strong';
-      if (abs > 0.5) return 'Moderate';
-      return 'Weak';
-    };
+    // Histograms (first 3 numeric columns)
+    const histImgs: string[] = [];
+    const histCols = result.histograms.slice(0, 3);
+    for (const h of histCols) {
+      const img = await renderHistogram(h.bins.map(b => b.range), h.bins.map(b => b.count), '#1565C0', h.column);
+      histImgs.push(img);
+    }
 
-    // ── Pre-render all charts ──
-    const donutImg = await renderDonutChart(numericCols, categoricalCols);
-    const meanImg = await renderMeanBarChart(
-      stats.map(s => String(s.feature)),
-      stats.map(s => s.mean)
-    );
+    // Category bars (first 2 categorical columns)
+    const catImgs: { img: string; title: string }[] = [];
+    const PALETTE = ['#1565C0','#06B6D4','#10B981','#F59E0B','#EF4444','#8B5CF6','#EC4899'];
+    for (const c of categorical.slice(0, 2)) {
+      const img = await renderCategoryBar(
+        c.data.slice(0, 10).map(d => d.name),
+        c.data.slice(0, 10).map(d => d.value),
+        PALETTE,
+        c.column
+      );
+      catImgs.push({ img, title: c.column });
+    }
 
-    // Histogram data
-    const ageBins = [
-      { label: '18-30', count: data.filter(r => r.Customer_Age >= 18 && r.Customer_Age < 30).length },
-      { label: '30-40', count: data.filter(r => r.Customer_Age >= 30 && r.Customer_Age < 40).length },
-      { label: '40-50', count: data.filter(r => r.Customer_Age >= 40 && r.Customer_Age < 50).length },
-      { label: '50-65', count: data.filter(r => r.Customer_Age >= 50 && r.Customer_Age <= 65).length },
-    ];
-    const qtyBins = [
-      { label: '1-5', count: data.filter(r => r.Quantity >= 1 && r.Quantity <= 5).length },
-      { label: '5-8', count: data.filter(r => r.Quantity > 5 && r.Quantity <= 8).length },
-      { label: '8-11', count: data.filter(r => r.Quantity > 8 && r.Quantity <= 11).length },
-      { label: '11-15', count: data.filter(r => r.Quantity > 11 && r.Quantity <= 15).length },
-    ];
-    const ratingBins = [
-      { label: '1-2', count: data.filter(r => r.Rating !== null && r.Rating >= 1 && r.Rating < 2).length },
-      { label: '2-3', count: data.filter(r => r.Rating !== null && r.Rating! >= 2 && r.Rating! < 3).length },
-      { label: '3-4', count: data.filter(r => r.Rating !== null && r.Rating! >= 3 && r.Rating! < 4).length },
-      { label: '4-5', count: data.filter(r => r.Rating !== null && r.Rating! >= 4 && r.Rating! <= 5).length },
-    ];
+    const heatmapImg = corrCols.length >= 2 ? await renderCorrelationHeatmap(corrCols, matrix) : null;
+    const missingImg = await renderMissingBar(missing.map(m => m.column), missing.map(m => m.pct));
 
-    const histAge = await renderHistogram(ageBins.map(b => b.label), ageBins.map(b => b.count), '#1565C0', 'Customer Age');
-    const histQty = await renderHistogram(qtyBins.map(b => b.label), qtyBins.map(b => b.count), '#06B6D4', 'Quantity');
-    const histRat = await renderHistogram(ratingBins.map(b => b.label), ratingBins.map(b => b.count), '#F59E0B', 'Rating');
-
-    // Category charts
-    const regionData = catCounts.find(c => c.column === 'Region')!;
-    const categoryData = catCounts.find(c => c.column === 'Category')!;
-    const segmentData = catCounts.find(c => c.column === 'Segment')!;
-
-    const regionImg = await renderCategoryBar(
-      regionData.data.map(d => d.name), regionData.data.map(d => d.value),
-      ['#1565C0', '#1976D2', '#1E88E5', '#2196F3'], 'Orders by Region'
-    );
-    const categoryImg = await renderCategoryBar(
-      categoryData.data.map(d => d.name), categoryData.data.map(d => d.value),
-      ['#1565C0', '#06B6D4', '#10B981', '#F59E0B', '#EF4444'], 'Orders by Category'
-    );
-    const segmentImg = await renderPieChart(
-      segmentData.data.map(d => d.name), segmentData.data.map(d => d.value),
-      ['#1565C0', '#06B6D4', '#F59E0B']
-    );
-
-    const heatmapImg = await renderCorrelationHeatmap(columns, matrix);
-
-    const missingImg = await renderMissingBar(
-      missing.map(m => String(m.column)), missing.map(m => m.pct)
-    );
-
-    // Box plot data
-    const computeBoxPlot = (key: keyof DataRow, label: string) => {
-      const vals = data.map(r => r[key] as number).filter(v => v !== null && v !== undefined).sort((a, b) => a - b);
-      const n = vals.length;
-      const q1 = vals[Math.floor(n * 0.25)];
-      const median = vals[Math.floor(n * 0.5)];
-      const q3 = vals[Math.floor(n * 0.75)];
-      const iqr = q3 - q1;
-      const lo = q1 - 1.5 * iqr;
-      const hi = q3 + 1.5 * iqr;
-      const inliers = vals.filter(v => v >= lo && v <= hi);
-      const outliers = vals.filter(v => v < lo || v > hi);
-      return { label, min: inliers[0], q1, median, q3, max: inliers[inliers.length - 1], outliers };
-    };
-    const boxPlotImg = await renderBoxPlots([
-      computeBoxPlot('Net_Revenue', 'Net Revenue'),
-      computeBoxPlot('Unit_Price', 'Unit Price'),
-    ]);
-
-    // ═══════════════════════════════════════
     // PAGE 1: Cover
-    // ═══════════════════════════════════════
-    pdf.setFillColor(...NAVY);
-    pdf.rect(0, 0, W, 22, 'F');
-    pdf.setTextColor(255, 255, 255);
-    pdf.setFontSize(18);
-    pdf.setFont('helvetica', 'bold');
-    pdf.text('AutoEDA \u2014 Automated EDA Report', M, 15);
-
-    pdf.setTextColor(60, 60, 60);
-    pdf.setFont('helvetica', 'normal');
-    pdf.setFontSize(13);
-    pdf.text('NexGen Analytix | Data Science & Analytics Department', M, 38);
+    pdf.setFillColor(...NAVY); pdf.rect(0, 0, W, 22, 'F');
+    pdf.setTextColor(255, 255, 255); pdf.setFontSize(18); pdf.setFont('helvetica', 'bold');
+    pdf.text('AutoEDA — Automated EDA Report', M, 15);
+    pdf.setTextColor(60, 60, 60); pdf.setFont('helvetica', 'normal'); pdf.setFontSize(13);
+    pdf.text('Automated Exploratory Data Analysis', M, 38);
     pdf.setFontSize(11);
     pdf.text(`Report Generated: ${now}`, M, 50);
-    pdf.text('Dataset: Retail Sales Data (500+ rows, 10 columns)', M, 58);
-    pdf.setDrawColor(180);
-    pdf.line(M, 66, W - M, 66);
-    pdf.setFontSize(11);
-    pdf.text('Prepared by: Sakshi Santosh Desai | Guide: Yash Gawande | MCA \u2014 SPPU 2026', M, 78);
+    pdf.text(`Dataset: ${fileInfo?.name ?? 'Uploaded File'} (${data.length.toLocaleString()} rows, ${colInfo.length} columns)`, M, 58);
+    pdf.setDrawColor(180); pdf.line(M, 66, W - M, 66);
     footer();
 
-    // ═══════════════════════════════════════
-    // PAGE 2: Dataset Overview + Donut
-    // ═══════════════════════════════════════
+    // PAGE 2: Dataset Overview
     pdf.addPage();
     let y = sectionHead('1. Dataset Overview', M);
-
     autoTable(pdf, {
-      startY: y,
-      head: [['Metric', 'Value']],
+      startY: y, head: [['Metric', 'Value']],
       body: [
-        ['Total Rows', String(data.length)],
-        ['Total Columns', '10'],
-        ['Numeric Columns', String(numericCols)],
-        ['Categorical Columns', String(categoricalCols)],
-        ['Memory Size', '~42 KB'],
+        ['Total Rows', data.length.toLocaleString()],
+        ['Total Columns', String(colInfo.length)],
+        ['Numeric Columns', String(numericCount)],
+        ['Categorical/Date Columns', String(categoricalCount)],
+        ['Memory Size', result.memorySize],
+        ['Duplicate Rows', String(result.duplicates)],
+        ['Total Outliers (IQR)', String(totalOutliers)],
       ],
       theme: 'grid',
-      styles: { fontSize: 10, cellPadding: 3, font: 'helvetica' },
+      styles: { fontSize: 10, cellPadding: 3 },
       headStyles: { fillColor: [...NAVY], textColor: 255, fontStyle: 'bold' },
       alternateRowStyles: { fillColor: [...WHITE_ALT] },
       margin: { left: M, right: M },
     });
     y = (pdf as any).lastAutoTable.finalY + 4;
-
     autoTable(pdf, {
       startY: y,
       head: [['Column Name', 'Data Type', 'Non-Null Count', 'Unique Values']],
       body: colInfo.map(c => [c.name, c.type, String(c.nonNull), String(c.unique)]),
       theme: 'grid',
-      styles: { fontSize: 9, cellPadding: 2.5, font: 'helvetica' },
+      styles: { fontSize: 9, cellPadding: 2.5 },
       headStyles: { fillColor: [...NAVY], textColor: 255, fontStyle: 'bold' },
       alternateRowStyles: { fillColor: [...LIGHT] },
       margin: { left: M, right: M },
     });
     y = (pdf as any).lastAutoTable.finalY + 6;
-
-    // Donut chart
-    addChartImage(donutImg, M + CW / 2 - 30, y, 60, 60, 'Column Type Distribution');
+    if (y + 65 < H - 20) addChartImage(donutImg, M + CW / 2 - 30, y, 60, 60, 'Column Type Distribution');
     footer();
 
-    // ═══════════════════════════════════════
-    // PAGE 3: Statistics + Mean bar
-    // ═══════════════════════════════════════
-    pdf.addPage();
-    y = sectionHead('2. Statistical Summary', M);
+    // PAGE 3: Statistics
+    if (stats.length > 0) {
+      pdf.addPage();
+      y = sectionHead('2. Statistical Summary', M);
+      autoTable(pdf, {
+        startY: y,
+        head: [['Feature', 'Count', 'Mean', 'Median', 'Std Dev', 'Min', 'Max', 'Skewness']],
+        body: stats.map(s => [s.feature, String(s.count), String(s.mean), String(s.median), String(s.std), String(s.min), String(s.max), String(s.skewness)]),
+        theme: 'grid',
+        styles: { fontSize: 9, cellPadding: 2.5, halign: 'center' },
+        headStyles: { fillColor: [...NAVY], textColor: 255, fontStyle: 'bold' },
+        alternateRowStyles: { fillColor: [...WHITE_ALT] },
+        margin: { left: M, right: M },
+      });
+      y = (pdf as any).lastAutoTable.finalY + 8;
+      if (y + 65 < H - 20) addChartImage(meanImg, M, y, CW, 60, 'Mean Values — Numeric Columns');
+      footer();
+    }
 
-    autoTable(pdf, {
-      startY: y,
-      head: [['Feature', 'Count', 'Mean', 'Median', 'Std Dev', 'Min', 'Max', 'Skewness']],
-      body: stats.map(s => [
-        String(s.feature), String(s.count), String(s.mean), String(s.median),
-        String(s.std), String(s.min), String(s.max), String(s.skewness),
-      ]),
-      theme: 'grid',
-      styles: { fontSize: 9, cellPadding: 2.5, font: 'helvetica', halign: 'center' },
-      headStyles: { fillColor: [...NAVY], textColor: 255, fontStyle: 'bold' },
-      alternateRowStyles: { fillColor: [...WHITE_ALT] },
-      margin: { left: M, right: M },
-    });
-    y = (pdf as any).lastAutoTable.finalY + 8;
+    // PAGE 4: Histograms
+    if (histImgs.length > 0) {
+      pdf.addPage();
+      y = sectionHead('3. Data Distribution Analysis', M);
+      const histW = histImgs.length === 1 ? CW : histImgs.length === 2 ? (CW - 4) / 2 : (CW - 8) / 3;
+      histImgs.forEach((img, i) => {
+        addChartImage(img, M + i * (histW + 4), y, histW, 55, histCols[i].column);
+      });
+      footer();
+    }
 
-    addChartImage(meanImg, M, y, CW, 65, 'Mean Values \u2014 Numeric Columns');
-    footer();
+    // PAGE 5: Categorical
+    if (catImgs.length > 0) {
+      pdf.addPage();
+      y = sectionHead('4. Categorical Analysis', M);
+      for (const c of catImgs) {
+        y = addChartImage(c.img, M, y, CW, 60, c.title);
+        y += 4;
+      }
+      footer();
+    }
 
-    // ═══════════════════════════════════════
-    // PAGE 4: Data Distribution (Histograms)
-    // ═══════════════════════════════════════
-    pdf.addPage();
-    y = sectionHead('3. Data Distribution Analysis', M);
+    // PAGE 6: Correlation
+    if (heatmapImg && corrCols.length >= 2) {
+      pdf.addPage();
+      y = sectionHead('5. Correlation Analysis', M);
+      y = addChartImage(heatmapImg, M, y, CW, 90, 'Correlation Heatmap');
+      y += 2;
+      if (topCorr.length > 0) {
+        autoTable(pdf, {
+          startY: y,
+          head: [['Feature A', 'Feature B', 'Correlation', 'Strength']],
+          body: topCorr.map(p => [p.a, p.b, p.r.toFixed(3), `${strengthLabel(p.r)} ${p.r > 0 ? 'Positive' : 'Negative'}`]),
+          theme: 'grid',
+          styles: { fontSize: 9, cellPadding: 2.5 },
+          headStyles: { fillColor: [...NAVY], textColor: 255, fontStyle: 'bold' },
+          alternateRowStyles: { fillColor: [...WHITE_ALT] },
+          margin: { left: M, right: M },
+        });
+      }
+      footer();
+    }
 
-    const histW = (CW - 8) / 3;
-    addChartImage(histAge, M, y, histW, 55, 'Customer Age');
-    addChartImage(histQty, M + histW + 4, y, histW, 55, 'Quantity');
-    addChartImage(histRat, M + (histW + 4) * 2, y, histW, 55, 'Rating');
-    footer();
-
-    // ═══════════════════════════════════════
-    // PAGE 5: Categorical Analysis
-    // ═══════════════════════════════════════
-    pdf.addPage();
-    y = sectionHead('4. Categorical Analysis', M);
-
-    y = addChartImage(regionImg, M, y, CW, 60, 'Orders by Region');
-    y += 4;
-    y = addChartImage(categoryImg, M, y, CW, 60, 'Orders by Category');
-    y += 4;
-    addChartImage(segmentImg, M + CW / 2 - 35, y, 70, 65, 'Customer Segment Distribution');
-    footer();
-
-    // ═══════════════════════════════════════
-    // PAGE 6: Correlation (Heatmap + Table)
-    // ═══════════════════════════════════════
-    pdf.addPage();
-    y = sectionHead('5. Correlation Analysis', M);
-
-    y = addChartImage(heatmapImg, M, y, CW, 90, 'Correlation Heatmap');
-    y += 2;
-
-    autoTable(pdf, {
-      startY: y,
-      head: [['Feature A', 'Feature B', 'Correlation', 'Strength']],
-      body: topCorr.map(p => [p.a, p.b, p.r.toFixed(3), `${strengthLabel(p.r)} ${p.r > 0 ? 'Positive' : 'Negative'}`]),
-      theme: 'grid',
-      styles: { fontSize: 9, cellPadding: 2.5, font: 'helvetica' },
-      headStyles: { fillColor: [...NAVY], textColor: 255, fontStyle: 'bold' },
-      alternateRowStyles: { fillColor: [...WHITE_ALT] },
-      margin: { left: M, right: M },
-    });
-    y = (pdf as any).lastAutoTable.finalY + 5;
-
-    pdf.setTextColor(60);
-    pdf.setFontSize(9);
-    pdf.setFont('helvetica', 'normal');
-    topCorr.forEach(p => {
-      pdf.text(`\u2022 ${p.a} \u2194 ${p.b}: r = ${p.r.toFixed(3)} (${strengthLabel(p.r)} ${p.r > 0 ? 'Positive' : 'Negative'})`, M + 3, y);
-      y += 5;
-    });
-    footer();
-
-    // ═══════════════════════════════════════
-    // PAGE 7: Missing Values (Chart + Table)
-    // ═══════════════════════════════════════
+    // PAGE 7: Missing Values
     pdf.addPage();
     y = sectionHead('6. Data Quality Report', M);
-
     y = addChartImage(missingImg, M, y, CW, 65, 'Missing Values by Column');
     y += 2;
-
     autoTable(pdf, {
       startY: y,
       head: [['Column', 'Missing Count', 'Missing %', 'Recommendation']],
-      body: missing.map(m => [
-        String(m.column), String(m.missing), `${m.pct}%`, getRecommendation(String(m.column), m.pct),
-      ]),
+      body: missing.map(m => [m.column, String(m.missing), `${m.pct}%`, m.recommendation]),
       theme: 'grid',
-      styles: { fontSize: 9, cellPadding: 2.5, font: 'helvetica' },
+      styles: { fontSize: 9, cellPadding: 2.5 },
       headStyles: { fillColor: [...NAVY], textColor: 255, fontStyle: 'bold' },
       alternateRowStyles: { fillColor: [...LIGHT] },
       margin: { left: M, right: M },
@@ -373,88 +258,61 @@ export default function TabReport({ data }: Props) {
       },
     });
     y = (pdf as any).lastAutoTable.finalY + 6;
-    pdf.setTextColor(60);
-    pdf.setFontSize(10);
-    pdf.text('Duplicate Rows Detected: 10', M, y);
-    pdf.text('Outliers Detected: 5', M, y + 6);
+    pdf.setTextColor(60); pdf.setFontSize(10);
+    pdf.text(`Duplicate Rows Detected: ${result.duplicates}`, M, y);
+    pdf.text(`Total Outliers Detected: ${totalOutliers}`, M, y + 6);
     footer();
 
-    // ═══════════════════════════════════════
-    // PAGE 8: Outlier Analysis (Box Plots)
-    // ═══════════════════════════════════════
+    // PAGE 8: Conclusion
     pdf.addPage();
-    y = sectionHead('7. Outlier Analysis', M);
-
-    y = addChartImage(boxPlotImg, M, y, CW, 70, 'Box Plots — Net Revenue & Unit Price');
-    y += 4;
-
-    pdf.setTextColor(60);
-    pdf.setFontSize(10);
-    pdf.setFont('helvetica', 'normal');
-    const outlierText = [
-      '\u2022 5 outliers were detected in Net_Revenue exceeding the IQR upper bound.',
-      '\u2022 Outlier values range from ~50,000 to ~99,000 compared to typical range of 0\u201330,000.',
-      '\u2022 These extreme values may indicate bulk orders or data entry errors.',
-      '\u2022 Recommended: Cap or winsorize outliers before predictive modeling.',
-    ];
-    outlierText.forEach(t => {
-      pdf.text(t, M, y);
-      y += 7;
-    });
-    footer();
-
-    // ═══════════════════════════════════════
-    // PAGE 9: Conclusion
-    // ═══════════════════════════════════════
-    pdf.addPage();
-    y = sectionHead('8. Conclusion & Recommendations', M);
-
-    pdf.setTextColor(60);
-    pdf.setFontSize(10);
-    pdf.setFont('helvetica', 'normal');
+    y = sectionHead('7. Conclusion & Recommendations', M);
+    pdf.setTextColor(60); pdf.setFontSize(10); pdf.setFont('helvetica', 'normal');
     const bullets = [
-      `The dataset contains ${data.length} rows and 10 columns covering retail sales data.`,
-      `${numericCols} numeric and ${categoricalCols} categorical columns were detected.`,
-      `${withMissing.length} column(s) have missing values \u2014 Rating (4.8%) and Discount (3.2%).`,
-      '10 duplicate rows were identified and should be removed before modeling.',
-      '5 outliers were detected in Net_Revenue requiring further investigation.',
-      `${topCorr.length} notable correlations found among numeric features.`,
+      `The dataset contains ${data.length.toLocaleString()} rows and ${colInfo.length} columns.`,
+      `${numericCount} numeric and ${categoricalCount} categorical/date columns were detected.`,
+      withMissing.length > 0
+        ? `${withMissing.length} column(s) have missing values. See data quality report for details.`
+        : 'No missing values detected — dataset is clean.',
+      result.duplicates > 0
+        ? `${result.duplicates} duplicate rows were identified and should be removed before modeling.`
+        : 'No duplicate rows detected.',
+      totalOutliers > 0
+        ? `${totalOutliers} outliers were detected across numeric columns requiring further investigation.`
+        : 'No significant outliers detected.',
+      topCorr.length > 0
+        ? `${topCorr.length} notable correlation(s) found among numeric features.`
+        : 'No strong correlations found among features.',
       '',
       'Recommendations:',
-      '\u2022 Remove duplicate rows to improve data quality.',
-      '\u2022 Impute missing Rating values with median and Discount with mode.',
-      '\u2022 Investigate and handle Net_Revenue outliers before predictive modeling.',
-      '\u2022 Consider feature engineering based on correlated variable pairs.',
-      '\u2022 Perform further analysis with visualizations for categorical distributions.',
-      '\u2022 Apply standard scaling to numeric features before ML model training.',
+      '• Remove duplicate rows to improve data quality.',
+      ...withMissing.map(m => `• ${m.column}: ${m.recommendation}`),
+      '• Investigate and handle outliers before predictive modeling.',
+      '• Apply standard scaling to numeric features before ML model training.',
     ];
     bullets.forEach(b => {
       if (b === '') { y += 4; return; }
       if (b.startsWith('Recommendations')) {
-        pdf.setFont('helvetica', 'bold');
-        pdf.text(b, M, y);
-        pdf.setFont('helvetica', 'normal');
+        pdf.setFont('helvetica', 'bold'); pdf.text(b, M, y); pdf.setFont('helvetica', 'normal');
       } else {
-        const prefix = b.startsWith('\u2022') ? '' : '\u2022 ';
-        pdf.text(`${prefix}${b}`, M + 3, y);
+        pdf.text(b.startsWith('•') ? b : `• ${b}`, M + 3, y);
       }
       y += 7;
     });
     footer();
 
-    pdf.save('AutoEDA_Report.pdf');
+    const fname = fileInfo?.name.replace(/\.[^.]+$/, '') ?? 'AutoEDA';
+    pdf.save(`${fname}_Report.pdf`);
   };
 
-  // ── Share ──
+  // ── Share ──────────────────────────────────────────────────────────────────
   const handleShare = () => {
-    const summary = `AutoEDA Report | ${data.length} rows, 10 cols | Missing: ${withMissing.length} cols | Duplicates: 10 | Outliers: 5 | Top Correlation: ${topCorr[0]?.a ?? 'N/A'} \u2194 ${topCorr[0]?.b ?? 'N/A'} (r=${topCorr[0]?.r.toFixed(3) ?? '0'})`;
+    const summary = `AutoEDA Report | ${data.length} rows, ${colInfo.length} cols | Missing: ${withMissing.length} cols | Duplicates: ${result.duplicates} | Outliers: ${totalOutliers}`;
     const encoded = encodeURIComponent(summary);
     const link = `${window.location.origin}/?report=${encoded}`;
     setShareLink(link);
     setCopied(false);
     setShareOpen(true);
   };
-
   const handleCopy = () => {
     navigator.clipboard.writeText(shareLink).then(() => {
       setCopied(true);
@@ -462,7 +320,6 @@ export default function TabReport({ data }: Props) {
       setTimeout(() => setCopied(false), 3000);
     });
   };
-
   const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(`Check out this AutoEDA report: ${shareLink}`)}`;
   const emailUrl = `mailto:?subject=${encodeURIComponent('AutoEDA Report')}&body=${encodeURIComponent(`View the AutoEDA report here: ${shareLink}`)}`;
 
@@ -475,31 +332,38 @@ export default function TabReport({ data }: Props) {
             <BarChart3 className="w-8 h-8 text-primary" />
             <div>
               <h2 className="text-2xl font-extrabold text-gradient">AutoEDA Report</h2>
-              <p className="text-sm text-muted-foreground">NexGen Analytix — Automated EDA</p>
+              <p className="text-sm text-muted-foreground">Automated Exploratory Data Analysis</p>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4 text-sm">
-            <div><span className="text-muted-foreground">Intern:</span> <span className="text-foreground">Sakshi Santosh Desai</span></div>
-            <div><span className="text-muted-foreground">Guide:</span> <span className="text-foreground">Yash Gawande</span></div>
             <div><span className="text-muted-foreground">Date:</span> <span className="text-foreground">{date}</span></div>
-            <div><span className="text-muted-foreground">Dataset:</span> <span className="text-foreground">Retail Sales Data</span></div>
+            <div><span className="text-muted-foreground">Dataset:</span> <span className="text-foreground">{fileInfo?.name ?? 'Uploaded File'}</span></div>
+            <div><span className="text-muted-foreground">Rows:</span> <span className="text-foreground">{data.length.toLocaleString()}</span></div>
+            <div><span className="text-muted-foreground">Columns:</span> <span className="text-foreground">{colInfo.length}</span></div>
           </div>
         </div>
 
         <div className="p-8 space-y-8">
           <Section icon={Database} title="Dataset Overview" color="border-l-primary">
-            <p className="text-sm text-muted-foreground">The dataset contains <b className="text-foreground">{data.length} rows</b> and <b className="text-foreground">10 columns</b>. It includes data on retail sales across regions, categories, and customer segments. <b className="text-foreground">10 duplicate rows</b> and <b className="text-foreground">5 outliers</b> were detected.</p>
+            <p className="text-sm text-muted-foreground">
+              The dataset contains <b className="text-foreground">{data.length.toLocaleString()} rows</b> and <b className="text-foreground">{colInfo.length} columns</b>.
+              {' '}<b className="text-foreground">{numericCount} numeric</b> and <b className="text-foreground">{categoricalCount} categorical/date</b> columns detected.
+              {result.duplicates > 0 && <> <b className="text-foreground">{result.duplicates} duplicate rows</b> detected.</>}
+              {totalOutliers > 0 && <> <b className="text-foreground">{totalOutliers} outliers</b> detected across numeric columns.</>}
+            </p>
           </Section>
 
-          <Section icon={FileText} title="Statistical Summary" color="border-l-accent">
-            <div className="space-y-2">
-              {stats.slice(0, 4).map(s => (
-                <p key={s.feature} className="text-sm text-muted-foreground">
-                  <b className="text-foreground">{s.feature}:</b> Mean={s.mean}, Median={s.median}, Std={s.std}, Range=[{s.min}, {s.max}]
-                </p>
-              ))}
-            </div>
-          </Section>
+          {stats.length > 0 && (
+            <Section icon={FileText} title="Statistical Summary" color="border-l-accent">
+              <div className="space-y-2">
+                {stats.slice(0, 5).map(s => (
+                  <p key={s.feature} className="text-sm text-muted-foreground">
+                    <b className="text-foreground">{s.feature}:</b> Mean={s.mean}, Median={s.median}, Std={s.std}, Range=[{s.min}, {s.max}]
+                  </p>
+                ))}
+              </div>
+            </Section>
+          )}
 
           <Section icon={AlertTriangle} title="Missing Values" color="border-l-warning">
             {withMissing.length === 0 ? (
@@ -507,21 +371,25 @@ export default function TabReport({ data }: Props) {
             ) : (
               <div className="space-y-1">
                 {withMissing.map(m => (
-                  <p key={m.column} className="text-sm text-muted-foreground"><b className="text-foreground">{m.column}:</b> {m.pct}% missing ({m.missing} values)</p>
+                  <p key={m.column} className="text-sm text-muted-foreground">
+                    <b className="text-foreground">{m.column}:</b> {m.pct}% missing ({m.missing} values) — {m.recommendation}
+                  </p>
                 ))}
               </div>
             )}
           </Section>
 
-          <Section icon={TrendingUp} title="Key Correlations" color="border-l-success">
-            <div className="space-y-1">
-              {topCorr.map(p => (
-                <p key={`${p.a}-${p.b}`} className="text-sm text-muted-foreground">
-                  <b className="text-foreground">{p.a} ↔ {p.b}:</b> r = {p.r.toFixed(3)} ({p.r > 0 ? 'Positive' : 'Negative'})
-                </p>
-              ))}
-            </div>
-          </Section>
+          {topCorr.length > 0 && (
+            <Section icon={TrendingUp} title="Key Correlations" color="border-l-success">
+              <div className="space-y-1">
+                {topCorr.map(p => (
+                  <p key={`${p.a}-${p.b}`} className="text-sm text-muted-foreground">
+                    <b className="text-foreground">{p.a} ↔ {p.b}:</b> r = {p.r.toFixed(3)} ({strengthLabel(p.r)}, {p.r > 0 ? 'Positive' : 'Negative'})
+                  </p>
+                ))}
+              </div>
+            </Section>
+          )}
         </div>
 
         {/* Actions */}

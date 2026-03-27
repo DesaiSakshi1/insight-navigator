@@ -1,8 +1,8 @@
 import { useMemo } from 'react';
-import { DataRow, getCorrelationMatrix } from '@/lib/generateData';
+import { AnalysisResult } from '@/lib/analyzeData';
 import { ArrowUpRight, ArrowDownRight } from 'lucide-react';
 
-interface Props { data: DataRow[] }
+interface Props { result: AnalysisResult }
 
 const getColor = (v: number) => {
   if (v >= 0.7) return 'bg-success/60 text-success-foreground';
@@ -12,8 +12,8 @@ const getColor = (v: number) => {
   return 'bg-secondary/30 text-muted-foreground';
 };
 
-export default function TabCorrelation({ data }: Props) {
-  const { columns, matrix } = useMemo(() => getCorrelationMatrix(data), [data]);
+export default function TabCorrelation({ result }: Props) {
+  const { columns, matrix } = result.correlation;
 
   const topPairs = useMemo(() => {
     const pairs: { a: string; b: string; r: number }[] = [];
@@ -34,6 +34,12 @@ export default function TabCorrelation({ data }: Props) {
     return 'Weak';
   };
 
+  if (columns.length === 0) return (
+    <div className="glass-card p-6 animate-fade-in">
+      <p className="text-muted-foreground">No numeric columns available for correlation analysis.</p>
+    </div>
+  );
+
   return (
     <div className="space-y-6 animate-fade-in">
       <div className="glass-card p-6 overflow-x-auto">
@@ -42,13 +48,13 @@ export default function TabCorrelation({ data }: Props) {
           <thead>
             <tr>
               <th className="p-2" />
-              {columns.map(c => <th key={c} className="p-2 text-xs text-muted-foreground font-medium text-center whitespace-nowrap">{c.replace('_', ' ')}</th>)}
+              {columns.map(c => <th key={c} className="p-2 text-xs text-muted-foreground font-medium text-center whitespace-nowrap">{c}</th>)}
             </tr>
           </thead>
           <tbody>
             {columns.map(row => (
               <tr key={row}>
-                <td className="p-2 text-xs text-muted-foreground font-medium whitespace-nowrap">{row.replace('_', ' ')}</td>
+                <td className="p-2 text-xs text-muted-foreground font-medium whitespace-nowrap">{row}</td>
                 {columns.map(col => {
                   const cell = matrix.find(m => m.x === row && m.y === col);
                   const v = cell?.value ?? 0;

@@ -1,22 +1,20 @@
-import { useMemo } from 'react';
 import { Rows3, Columns3, AlertTriangle, Copy, TrendingDown } from 'lucide-react';
-import { DataRow, getMissingValues } from '@/lib/generateData';
+import { AnalysisResult } from '@/lib/analyzeData';
 
-interface Props { data: DataRow[] }
+interface Props { result: AnalysisResult }
 
-export default function KPICards({ data }: Props) {
-  const missing = useMemo(() => getMissingValues(data), [data]);
-  const totalMissing = missing.reduce((s, m) => s + m.missing, 0);
-  const missingPct = ((totalMissing / (data.length * Object.keys(data[0]).length)) * 100).toFixed(1);
-  const dupes = 10;
-  const outliers = 5;
+export default function KPICards({ result }: Props) {
+  const totalMissing = result.missing.reduce((s, m) => s + m.missing, 0);
+  const totalCells = result.data.length * result.columns.length;
+  const missingPct = totalCells > 0 ? ((totalMissing / totalCells) * 100).toFixed(1) : '0.0';
+  const totalOutliers = result.outliers.reduce((s, o) => s + o.count, 0);
 
   const kpis = [
-    { icon: Rows3, label: 'Total Rows', value: data.length.toString(), border: 'border-l-primary', glow: 'glow-blue' },
-    { icon: Columns3, label: 'Total Columns', value: '10', border: 'border-l-accent', glow: 'glow-cyan' },
+    { icon: Rows3, label: 'Total Rows', value: result.data.length.toLocaleString(), border: 'border-l-primary', glow: 'glow-blue' },
+    { icon: Columns3, label: 'Total Columns', value: result.columns.length.toString(), border: 'border-l-accent', glow: 'glow-cyan' },
     { icon: AlertTriangle, label: 'Missing Values', value: `${missingPct}%`, border: 'border-l-warning', glow: 'glow-amber' },
-    { icon: Copy, label: 'Duplicates Found', value: dupes.toString(), border: 'border-l-warning', glow: 'glow-amber' },
-    { icon: TrendingDown, label: 'Outliers Detected', value: outliers.toString(), border: 'border-l-destructive', glow: 'glow-red' },
+    { icon: Copy, label: 'Duplicates Found', value: result.duplicates.toString(), border: 'border-l-warning', glow: 'glow-amber' },
+    { icon: TrendingDown, label: 'Outliers Detected', value: totalOutliers.toString(), border: 'border-l-destructive', glow: 'glow-red' },
   ];
 
   return (
